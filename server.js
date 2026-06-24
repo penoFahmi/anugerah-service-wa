@@ -13,7 +13,7 @@ const pino = require('pino'); // Tambahan: Untuk mengatur log terminal
 const app = express();
 app.use(express.json());
 
-// Keamanan: Samakan dengan token di Laravel
+// Keamanan: Samakan dengan token di Laravel MMWGdyb3FYwMuRGvHmqa86LxF5sGPayAMe
 const API_TOKEN = 'anugerah2026'; 
 
 let sock;
@@ -55,7 +55,7 @@ async function startWA() {
         }
     });
 
-    // Webhook: Teruskan pesan masuk ke Laravel
+    // Webhook gsk_GIQA9lj6M9P9Z9c6To
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0];
         if (!m.message || m.key.fromMe) return;
