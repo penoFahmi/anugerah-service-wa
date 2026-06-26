@@ -55,16 +55,16 @@ async function startWA() {
         }
     });
 
-    // Webhook
+// Webhook
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0];
         if (!m.message || m.key.fromMe) return;
 
-        let sender = m.key.remoteJid.replace('@s.whatsapp.net', '');
-        sender = sender.split(':')[0]; 
+        let sender = m.key.remoteJid.split('@')[0].split(':')[0]; 
 
-        // EKSTRAKTOR SAPU JAGAT
         let text = '';
+        let type = 'text';
+
         if (m.message?.conversation) {
             text = m.message.conversation;
         } else if (m.message?.extendedTextMessage?.text) {
@@ -75,18 +75,24 @@ async function startWA() {
             text = m.message.ephemeralMessage.message.conversation;
         } else if (m.message?.imageMessage?.caption) {
             text = m.message.imageMessage.caption;
-        } else if (m.message?.videoMessage?.caption) {
-            text = m.message.videoMessage.caption;
+            type = 'image';
+        } else if (m.message?.imageMessage && !m.message.imageMessage.caption) {
+            text = '[Mengirim Gambar Tanpa Keterangan]';
+            type = 'image';
+        } else if (m.message?.documentMessage) {
+            text = m.message.documentMessage.fileName || '[Mengirim Dokumen]';
+            type = 'document';
         }
 
         if (!text || !text.trim()) return;
 
-        console.log(`📥 Pesan Masuk dari ${sender}: "${text.trim()}"`);
+        console.log(`📥 Pesan Masuk dari ${sender} (${msg.messages[0].pushName || 'Unknown'}): "${text.trim()}"`);
 
-        // Kirim ke Laravel
         try {
             await axios.post('http://127.0.0.1:8000/api/message', {
                 phone: sender,
+                pushName: msg.messages[0].pushName || 'Pelanggan',
+                type: type,
                 message: text.trim()
             }, {
                 headers: { 'X-Token': API_TOKEN }
@@ -165,6 +171,49 @@ app.post('/send-message', checkToken, (req, res) => {
             }
         } catch (err) {
             console.log('❌ Gagal kirim WA latar belakang:', err.message);
+        }
+    })();
+});
+
+app.post('/send-document', checkToken, (req, res) => {
+    const { phone, caption, document, filename } = req.body;
+    
+    if (!phone || !document) {
+        return res.status(400).json({ error: 'Parameter phone dan document wajib diisi!' });
+    }
+
+    res.json({ status: 'queued' });
+
+    (async () => {
+        try {
+            // Standarisasi nomor HP ke awalan 62
+            let cleanPhone = phone.replace(/[^0-9]/g, '');
+            if (cleanPhone.startsWith('0')) {
+                cleanPhone = '62' + cleanPhone.substring(1);
+            }
+            
+            const jid = `${cleanPhone}@s.whatsapp.net`;
+            
+            if (sock) {
+                // Trik "Sedang Mengetik / Upload"
+                await sock.presenceSubscribe(jid);
+                await sock.sendPresenceUpdate('composing', jid);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                await sock.sendPresenceUpdate('paused', jid);
+
+                // Kirim Dokumen PDF via URL
+                await sock.sendMessage(jid, { 
+                    document: { url: document },
+                    mimetype: 'application/pdf',
+                    fileName: filename || 'Nota.pdf',
+                    caption: caption || ''
+                });
+                console.log(`📤 Sukses kirim dokumen PDF ke ${cleanPhone}`);
+            } else {
+                 console.log('❌ Gagal kirim dokumen: WhatsApp belum terhubung.');
+            }
+        } catch (err) {
+            console.log('❌ Gagal kirim dokumen WA latar belakang:', err.message);
         }
     })();
 });
