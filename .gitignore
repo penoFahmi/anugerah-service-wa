@@ -3,4 +3,4 @@ node_modules/
 
 # Baileys / WA Gateway specific
 auth/
-*.json
+
