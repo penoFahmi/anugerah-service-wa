@@ -13,7 +13,7 @@ const pino = require('pino'); // Tambahan: Untuk mengatur log terminal
 const app = express();
 app.use(express.json());
 
-// Keamanan: Samakan dengan token di Laravel MMWGdyb3FYwMuRGvHmqa86LxF5sGPayAMe dummy
+// Keamanan: Samakan dengan token di Laravel
 const API_TOKEN = 'anugerah2026'; 
 
 let sock;
@@ -55,7 +55,7 @@ async function startWA() {
         }
     });
 
-    // Webhook gsk_GIQA9lj6M9P9Z9c6To-dummy
+    // Webhook
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0];
         if (!m.message || m.key.fromMe) return;
@@ -85,7 +85,7 @@ async function startWA() {
 
         // Kirim ke Laravel
         try {
-            await axios.post('https://anucom.elhalc8n.space/api/message', {
+            await axios.post('http://127.0.0.1:8000/api/message', {
                 phone: sender,
                 message: text.trim()
             }, {
