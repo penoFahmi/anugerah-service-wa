@@ -8,16 +8,99 @@ const {
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
-const pino = require('pino'); // Tambahan: Untuk mengatur log terminal
+const path = require('path');
+const pino = require('pino');
 
 const app = express();
 app.use(express.json());
 
-// Keamanan: Samakan dengan token di Laravel
-const API_TOKEN = 'anugerah2026'; 
+const API_TOKEN = 'anugerah2026';
+const LARAVEL_WEBHOOK_URL = 'http://127.0.0.1:8000/api/message';
+const LOG_FILE_PATH = path.join(__dirname, 'wa_debug_logs.jsonl');
 
 let sock;
 let lastQR = null;
+
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
+
+function logRawPayload(eventType, payload) {
+    try {
+        const logEntry = {
+            timestamp: new Date().toISOString(),
+            event: eventType,
+            data: payload
+        };
+        fs.appendFileSync(LOG_FILE_PATH, JSON.stringify(logEntry) + '\n');
+    } catch (error) {
+        console.error('[System] Gagal menulis ke file log debug:', error.message);
+    }
+}
+
+/**
+ * [UPDATE]
+ * Mengekstrak nomor telepon murni (628xxx) dari payload Baileys yang rumit.
+ * Memprioritaskan remoteJidAlt jika ID utamanya adalah @lid (Linked Device).
+ */
+function extractCleanPhoneNumber(messageObject) {
+    let rawJid = messageObject.key.remoteJid;
+    let participantJid = messageObject.key.participant || rawJid;
+    
+    if (messageObject.key.remoteJidAlt && messageObject.key.remoteJidAlt.includes('@s.whatsapp.net')) {
+        participantJid = messageObject.key.remoteJidAlt;
+    }
+    
+    // Potong karakter @... dan :...
+    let cleanNumber = participantJid.split('@')[0].split(':')[0];
+    
+    return cleanNumber;
+}
+
+function getMessageType(messageContent) {
+    if (!messageContent) return 'unknown';
+    
+    if (messageContent.conversation || messageContent.extendedTextMessage) return 'text';
+    if (messageContent.imageMessage) return 'image';
+    if (messageContent.documentMessage) return 'document';
+    if (messageContent.audioMessage) return 'voice_note';
+    if (messageContent.videoMessage) return 'video';
+    if (messageContent.stickerMessage) return 'sticker';
+    if (messageContent.contactsArrayMessage || messageContent.contactMessage) return 'contact';
+    if (messageContent.locationMessage) return 'location';
+    
+    return 'other';
+}
+
+function extractMessageText(messageContent) {
+    if (!messageContent) return '';
+    
+    if (messageContent.conversation) {
+        return messageContent.conversation;
+    }
+    if (messageContent.extendedTextMessage && messageContent.extendedTextMessage.text) {
+        return messageContent.extendedTextMessage.text;
+    }
+    if (messageContent.imageMessage && messageContent.imageMessage.caption) {
+        return messageContent.imageMessage.caption;
+    }
+    if (messageContent.documentMessage && messageContent.documentMessage.fileName) {
+        return messageContent.documentMessage.fileName;
+    }
+    
+    return '';
+}
+
+function checkToken(req, res, next) {
+    const token = req.headers['x-token'];
+    if (token !== API_TOKEN) {
+        return res.status(401).json({ error: 'Akses Ditolak. Token tidak valid.' });
+    }
+    next();
+}
+// ==========================================
+// WHATSAPP CORE LOGIC
+// ==========================================
 
 async function startWA() {
     const { state, saveCreds } = await useMultiFileAuthState('auth');
@@ -26,8 +109,7 @@ async function startWA() {
     sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true,
-        // PERBAIKAN 1: Bungkam log bawaan Baileys agar terminalmu bersih
+        printQRInTerminal: true, // QR Tetap muncul di Terminal
         logger: pino({ level: 'silent' }), 
         browser: ['Anugerah ERP', 'Chrome', '1.0.0']
     });
@@ -37,82 +119,74 @@ async function startWA() {
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         
+        // Simpan QR terbaru ke variabel agar bisa diambil Laravel
         if (qr) lastQR = qr;
 
         if (connection === 'open') {
-            console.log('✅ WhatsApp Connected & Ready!');
-            lastQR = null;
+            console.log('[System] WhatsApp Connected and Ready.');
+            lastQR = null; // Kosongkan QR kalau sudah konek
         }
 
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
-                console.log('🔄 Koneksi terputus, mencoba menghubungkan kembali...');
-                setTimeout(startWA, 3000); // Beri jeda 3 detik sebelum konek ulang
+                console.log('[System] Koneksi terputus. Mencoba menghubungkan kembali...');
+                setTimeout(startWA, 3000);
             } else {
-                console.log('❌ WhatsApp Logged Out dari HP. Silakan hapus folder auth dan scan ulang.');
+                console.log('[System] Sesi WhatsApp telah Logout. Silakan hapus folder auth dan scan ulang QR.');
             }
         }
     });
 
-// Webhook
+    sock.ev.on('call', async (callData) => {
+        logRawPayload('incoming_call', callData);
+        console.log('[System] Mendapatkan panggilan masuk. Data direkam ke log.');
+    });
+
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0];
+        
         if (!m.message || m.key.fromMe) return;
 
-        let sender = m.key.remoteJid.split('@')[0].split(':')[0]; 
+        logRawPayload('incoming_message', m);
 
-        let text = '';
-        let type = 'text';
+        if (m.key.remoteJid.includes('@g.us')) return;
 
-        if (m.message?.conversation) {
-            text = m.message.conversation;
-        } else if (m.message?.extendedTextMessage?.text) {
-            text = m.message.extendedTextMessage.text;
-        } else if (m.message?.ephemeralMessage?.message?.extendedTextMessage?.text) {
-            text = m.message.ephemeralMessage.message.extendedTextMessage.text;
-        } else if (m.message?.ephemeralMessage?.message?.conversation) {
-            text = m.message.ephemeralMessage.message.conversation;
-        } else if (m.message?.imageMessage?.caption) {
-            text = m.message.imageMessage.caption;
-            type = 'image';
-        } else if (m.message?.imageMessage && !m.message.imageMessage.caption) {
-            text = '[Mengirim Gambar Tanpa Keterangan]';
-            type = 'image';
-        } else if (m.message?.documentMessage) {
-            text = m.message.documentMessage.fileName || '[Mengirim Dokumen]';
-            type = 'document';
+        const senderPhone = extractCleanPhoneNumber(m);
+        const pushName = m.pushName || 'Unknown';
+        const messageType = getMessageType(m.message);
+        let extractedText = extractMessageText(m.message);
+
+        if (!extractedText.trim()) {
+            if (messageType === 'image') extractedText = '[Gambar tanpa keterangan]';
+            else if (messageType === 'voice_note') extractedText = '[Pesan Suara / Voice Note]';
+            else if (messageType === 'sticker') extractedText = '[Stiker]';
+            else if (messageType === 'document') extractedText = '[Dokumen]';
+            else return; 
         }
 
-        if (!text || !text.trim()) return;
-
-        console.log(`📥 Pesan Masuk dari ${sender} (${msg.messages[0].pushName || 'Unknown'}): "${text.trim()}"`);
+        console.log(`[Inbound] Pesan dari ${senderPhone} (${pushName}) | Tipe: ${messageType}`);
 
         try {
-            await axios.post('http://127.0.0.1:8000/api/message', {
-                phone: sender,
-                pushName: msg.messages[0].pushName || 'Pelanggan',
-                type: type,
-                message: text.trim()
+            await axios.post(LARAVEL_WEBHOOK_URL, {
+                phone: senderPhone,
+                pushName: pushName,
+                type: messageType,
+                message: extractedText.trim()
             }, {
                 headers: { 'X-Token': API_TOKEN }
             });
-            console.log(`✅ Diteruskan ke Laravel`);
         } catch (err) {
-            console.log('❌ Gagal lapor ke Laravel (Pastikan server Laravel hidup)');
+            console.log('[Error] Gagal meneruskan pesan ke Laravel.');
         }
     });
 }
 
-// PERBAIKAN 2: Middleware Cek Token untuk semua endpoint POST
-function checkToken(req, res, next) {
-    const token = req.headers['x-token'];
-    if (token !== API_TOKEN) {
-        return res.status(401).json({ error: 'Akses Ditolak! Token tidak valid.' });
-    }
-    next();
-}
+// ==========================================
+// EXPRESS ENDPOINTS (UNTUK LARAVEL)
+// ==========================================
 
+// 1. Endpoint untuk menampilkan QR di Laravel (KEMBALI DITAMBAHKAN)
 app.get('/status', (req, res) => {
     res.json({
         isConnected: !!sock?.user,
@@ -121,102 +195,75 @@ app.get('/status', (req, res) => {
     });
 });
 
+// 2. Endpoint untuk Logout dari Laravel (KEMBALI DITAMBAHKAN)
 app.post('/logout', checkToken, async (req, res) => {
-    console.log('⚠️ Menerima perintah Logout dari Laravel...');
+    console.log('[System] Menerima perintah instruksi Logout.');
     try {
         if (sock) await sock.logout();
     } catch (e) {}
 
     if (fs.existsSync('./auth')) {
         fs.rmSync('./auth', { recursive: true, force: true });
-        console.log('🗑️ Folder sesi auth berhasil dihapus.');
+        console.log('[System] Folder sesi autentikasi berhasil dihapus.');
     }
 
-    lastQR = null; sock = null;
+    lastQR = null; 
+    sock = null;
     startWA();
+    
     res.json({ status: 'logged_out' });
 });
 
+// 3. Endpoint Kirim Pesan Teks
 app.post('/send-message', checkToken, (req, res) => {
     const { phone, message } = req.body;
-    
-    if (!phone || !message) {
-        return res.status(400).json({ error: 'Parameter phone dan message wajib diisi!' });
-    }
+    if (!phone || !message) return res.status(400).json({ error: 'Parameter phone dan message wajib diisi.' });
 
     res.json({ status: 'queued' });
 
     (async () => {
         try {
-            // PERBAIKAN 3: Standarisasi format nomor ke 62 (menghilangkan awalan 0 atau +62)
             let cleanPhone = phone.replace(/[^0-9]/g, '');
-            if (cleanPhone.startsWith('0')) {
-                cleanPhone = '62' + cleanPhone.substring(1);
-            }
-            
+            if (cleanPhone.startsWith('0')) cleanPhone = '62' + cleanPhone.substring(1);
             const jid = `${cleanPhone}@s.whatsapp.net`;
             
             if (sock) {
-                // Trik "Sedang Mengetik"
-                await sock.presenceSubscribe(jid);
-                await new Promise(resolve => setTimeout(resolve, 500));
-                await sock.sendPresenceUpdate('composing', jid);
-                await new Promise(resolve => setTimeout(resolve, 1500));
-                await sock.sendPresenceUpdate('paused', jid);
-
                 await sock.sendMessage(jid, { text: message });
-                console.log(`📤 Sukses kirim balasan ke ${cleanPhone}`);
-            } else {
-                 console.log('❌ Gagal kirim: WhatsApp belum terhubung.');
+                console.log(`[Outbound] Pesan terkirim ke ${jid}.`);
             }
         } catch (err) {
-            console.log('❌ Gagal kirim WA latar belakang:', err.message);
+            console.log(`[Error] Gagal mengirim pesan: ${err.message}`);
         }
     })();
 });
 
+// 4. Endpoint Kirim PDF
 app.post('/send-document', checkToken, (req, res) => {
     const { phone, caption, document, filename } = req.body;
-    
-    if (!phone || !document) {
-        return res.status(400).json({ error: 'Parameter phone dan document wajib diisi!' });
-    }
+    if (!phone || !document) return res.status(400).json({ error: 'Parameter phone dan document wajib diisi.' });
 
     res.json({ status: 'queued' });
 
     (async () => {
         try {
-            // Standarisasi nomor HP ke awalan 62
             let cleanPhone = phone.replace(/[^0-9]/g, '');
-            if (cleanPhone.startsWith('0')) {
-                cleanPhone = '62' + cleanPhone.substring(1);
-            }
-            
+            if (cleanPhone.startsWith('0')) cleanPhone = '62' + cleanPhone.substring(1);
             const jid = `${cleanPhone}@s.whatsapp.net`;
             
             if (sock) {
-                // Trik "Sedang Mengetik / Upload"
-                await sock.presenceSubscribe(jid);
-                await sock.sendPresenceUpdate('composing', jid);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                await sock.sendPresenceUpdate('paused', jid);
-
-                // Kirim Dokumen PDF via URL
                 await sock.sendMessage(jid, { 
                     document: { url: document },
                     mimetype: 'application/pdf',
-                    fileName: filename || 'Nota.pdf',
+                    fileName: filename || 'Dokumen.pdf',
                     caption: caption || ''
                 });
-                console.log(`📤 Sukses kirim dokumen PDF ke ${cleanPhone}`);
-            } else {
-                 console.log('❌ Gagal kirim dokumen: WhatsApp belum terhubung.');
+                console.log(`[Outbound] Dokumen terkirim ke ${jid}.`);
             }
         } catch (err) {
-            console.log('❌ Gagal kirim dokumen WA latar belakang:', err.message);
+            console.log(`[Error] Gagal mengirim dokumen: ${err.message}`);
         }
     })();
 });
 
 startWA();
-app.listen(3001, () => console.log('🚀 WA Gateway Berjalan di Port 3001'));
+app.listen(3001, () => console.log('[System] WhatsApp Gateway berjalan di Port 3001.'));
