@@ -145,8 +145,6 @@ async function startWA() {
 
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0];
-        
-        if (!m.message || m.key.fromMe) return;
 
         logRawPayload('incoming_message', m);
 
@@ -157,6 +155,8 @@ async function startWA() {
         const messageType = getMessageType(m.message);
         let extractedText = extractMessageText(m.message);
 
+        const isFromMe = m.key.fromMe; 
+
         if (!extractedText.trim()) {
             if (messageType === 'image') extractedText = '[Gambar tanpa keterangan]';
             else if (messageType === 'voice_note') extractedText = '[Pesan Suara / Voice Note]';
@@ -165,14 +165,17 @@ async function startWA() {
             else return; 
         }
 
-        console.log(`[Inbound] Pesan dari ${senderPhone} (${pushName}) | Tipe: ${messageType}`);
+        // console.log(`[Inbound] Pesan dari ${senderPhone} (${pushName}) | Tipe: ${messageType}`);
+
+        console.log(`[${isFromMe ? 'Outbound HP' : 'Inbound'}] Pesan: "${extractedText.trim()}"`);
 
         try {
             await axios.post(LARAVEL_WEBHOOK_URL, {
                 phone: senderPhone,
                 pushName: pushName,
                 type: messageType,
-                message: extractedText.trim()
+                message: extractedText.trim(),
+                isFromMe: isFromMe 
             }, {
                 headers: { 'X-Token': API_TOKEN }
             });
