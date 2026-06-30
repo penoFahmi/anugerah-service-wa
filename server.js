@@ -217,7 +217,9 @@ app.post('/logout', checkToken, async (req, res) => {
     res.json({ status: 'logged_out' });
 });
 
-// 3. Endpoint Kirim Pesan Teks
+// ==========================================
+// ENDPOINT KIRIM TEKS
+// ==========================================
 app.post('/send-message', checkToken, (req, res) => {
     const { phone, message } = req.body;
     if (!phone || !message) return res.status(400).json({ error: 'Parameter phone dan message wajib diisi.' });
@@ -240,7 +242,9 @@ app.post('/send-message', checkToken, (req, res) => {
     })();
 });
 
-// 4. Endpoint Kirim PDF
+// ==========================================
+// ENDPOINT KIRIM PDF
+// ==========================================
 app.post('/send-document', checkToken, (req, res) => {
     const { phone, caption, document, filename } = req.body;
     if (!phone || !document) return res.status(400).json({ error: 'Parameter phone dan document wajib diisi.' });
