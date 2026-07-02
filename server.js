@@ -146,41 +146,58 @@ async function startWA() {
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0];
 
+        // 1. FILTER KETAT: Abaikan jika tidak ada pesan sama sekali atau ini adalah Protocol Message
+        if (!m.message) return;
+        if (m.message.protocolMessage || m.message.senderKeyDistributionMessage) return;
+
+        // 2. Abaikan pesan dari grup
+        if (m.key.remoteJid && m.key.remoteJid.includes('@g.us')) return;
+
+        // Catat payload murni untuk debug
         logRawPayload('incoming_message', m);
 
-        if (m.key.remoteJid.includes('@g.us')) return;
-
-        const senderPhone = extractCleanPhoneNumber(m);
-        const pushName = m.pushName || 'Unknown';
-        const messageType = getMessageType(m.message);
-        let extractedText = extractMessageText(m.message);
-
-        const isFromMe = m.key.fromMe; 
-
-        if (!extractedText.trim()) {
-            if (messageType === 'image') extractedText = '[Gambar tanpa keterangan]';
-            else if (messageType === 'voice_note') extractedText = '[Pesan Suara / Voice Note]';
-            else if (messageType === 'sticker') extractedText = '[Stiker]';
-            else if (messageType === 'document') extractedText = '[Dokumen]';
-            else return; 
-        }
-
-        // console.log(`[Inbound] Pesan dari ${senderPhone} (${pushName}) | Tipe: ${messageType}`);
-
-        console.log(`[${isFromMe ? 'Outbound HP' : 'Inbound'}] Pesan: "${extractedText.trim()}"`);
-
         try {
+            const senderPhone = extractCleanPhoneNumber(m);
+            const pushName = m.pushName || 'Unknown';
+            const messageType = getMessageType(m.message);
+            let extractedText = extractMessageText(m.message);
+
+            const isFromMe = m.key.fromMe || false; // Pastikan boolean aman
+
+            // Tangani tipe media tanpa teks
+            if (!extractedText.trim()) {
+                if (messageType === 'image') extractedText = '[Gambar]';
+                else if (messageType === 'voice_note') extractedText = '[Voice Note]';
+                else if (messageType === 'sticker') extractedText = '[Stiker]';
+                else if (messageType === 'document') extractedText = '[Dokumen]';
+                else return; // Abaikan jika benar-benar kosong/tipe tidak dikenal
+            }
+
+            const cleanText = extractedText.trim();
+            console.log(`[${isFromMe ? 'Outbound HP' : 'Inbound'}] Pesan: "${cleanText}"`);
+
+            // KIRIM KE LARAVEL
             await axios.post(LARAVEL_WEBHOOK_URL, {
                 phone: senderPhone,
                 pushName: pushName,
                 type: messageType,
-                message: extractedText.trim(),
+                message: cleanText,
                 isFromMe: isFromMe 
             }, {
                 headers: { 'X-Token': API_TOKEN }
             });
+            
+            console.log(`[System] Pesan diteruskan ke Laravel.`);
+            
         } catch (err) {
-            console.log('[Error] Gagal meneruskan pesan ke Laravel.');
+            // Error handling yang lebih detail agar kita tahu apa yang rusak
+            console.log('[Error] Gagal memproses atau meneruskan pesan:');
+            if (err.response) {
+                console.log('--- Ditolak oleh Laravel ---');
+                console.log(err.response.data);
+            } else {
+                console.log(err.message);
+            }
         }
     });
 }
