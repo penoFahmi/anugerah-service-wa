@@ -8,7 +8,6 @@ const {
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
-const path = require('path');
 const pino = require('pino');
 
 const app = express();
@@ -16,7 +15,6 @@ app.use(express.json());
 
 const API_TOKEN = 'anugerah2026';
 const LARAVEL_WEBHOOK_URL = 'http://127.0.0.1:8000/api/message';
-const LOG_FILE_PATH = path.join(__dirname, 'wa_debug_logs.jsonl');
 
 let sock;
 let lastQR = null;
@@ -25,21 +23,7 @@ let lastQR = null;
 // HELPER FUNCTIONS
 // ==========================================
 
-function logRawPayload(eventType, payload) {
-    try {
-        const logEntry = {
-            timestamp: new Date().toISOString(),
-            event: eventType,
-            data: payload
-        };
-        fs.appendFileSync(LOG_FILE_PATH, JSON.stringify(logEntry) + '\n');
-    } catch (error) {
-        console.error('[System] Gagal menulis ke file log debug:', error.message);
-    }
-}
-
 /**
- * [UPDATE]
  * Mengekstrak nomor telepon murni (628xxx) dari payload Baileys yang rumit.
  * Memprioritaskan remoteJidAlt jika ID utamanya adalah @lid (Linked Device).
  */
@@ -52,9 +36,7 @@ function extractCleanPhoneNumber(messageObject) {
     }
     
     // Potong karakter @... dan :...
-    let cleanNumber = participantJid.split('@')[0].split(':')[0];
-    
-    return cleanNumber;
+    return participantJid.split('@')[0].split(':')[0];
 }
 
 function getMessageType(messageContent) {
@@ -98,6 +80,7 @@ function checkToken(req, res, next) {
     }
     next();
 }
+
 // ==========================================
 // WHATSAPP CORE LOGIC
 // ==========================================
@@ -109,8 +92,8 @@ async function startWA() {
     sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true, // QR Tetap muncul di Terminal
-        logger: pino({ level: 'silent' }), 
+        printQRInTerminal: true, 
+        logger: pino({ level: 'silent' }), // Nonaktifkan log bawaan Baileys yang berisik
         browser: ['Anugerah ERP', 'Chrome', '1.0.0']
     });
 
@@ -119,12 +102,11 @@ async function startWA() {
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
         
-        // Simpan QR terbaru ke variabel agar bisa diambil Laravel
         if (qr) lastQR = qr;
 
         if (connection === 'open') {
             console.log('[System] WhatsApp Connected and Ready.');
-            lastQR = null; // Kosongkan QR kalau sudah konek
+            lastQR = null; 
         }
 
         if (connection === 'close') {
@@ -138,45 +120,40 @@ async function startWA() {
         }
     });
 
-    sock.ev.on('call', async (callData) => {
-        logRawPayload('incoming_call', callData);
-        console.log('[System] Mendapatkan panggilan masuk. Data direkam ke log.');
+    sock.ev.on('call', async () => {
+        console.log('[System] Panggilan masuk diabaikan.');
     });
 
     sock.ev.on('messages.upsert', async (msg) => {
         const m = msg.messages[0];
 
-        // 1. FILTER KETAT: Abaikan jika tidak ada pesan sama sekali atau ini adalah Protocol Message
+        // 1. FILTER KETAT: Abaikan jika tidak ada pesan atau pesan sistem
         if (!m.message) return;
         if (m.message.protocolMessage || m.message.senderKeyDistributionMessage) return;
 
         // 2. Abaikan pesan dari grup
         if (m.key.remoteJid && m.key.remoteJid.includes('@g.us')) return;
 
-        // Catat payload murni untuk debug
-        logRawPayload('incoming_message', m);
-
         try {
             const senderPhone = extractCleanPhoneNumber(m);
             const pushName = m.pushName || 'Unknown';
             const messageType = getMessageType(m.message);
             let extractedText = extractMessageText(m.message);
+            const isFromMe = m.key.fromMe || false;
 
-            const isFromMe = m.key.fromMe || false; // Pastikan boolean aman
-
-            // Tangani tipe media tanpa teks
+            // Tangani tipe media yang tidak memiliki teks (caption)
             if (!extractedText.trim()) {
                 if (messageType === 'image') extractedText = '[Gambar]';
                 else if (messageType === 'voice_note') extractedText = '[Voice Note]';
                 else if (messageType === 'sticker') extractedText = '[Stiker]';
                 else if (messageType === 'document') extractedText = '[Dokumen]';
-                else return; // Abaikan jika benar-benar kosong/tipe tidak dikenal
+                else return; // Abaikan jika benar-benar kosong
             }
 
             const cleanText = extractedText.trim();
-            console.log(`[${isFromMe ? 'Outbound HP' : 'Inbound'}] Pesan: "${cleanText}"`);
+            console.log(`[${isFromMe ? 'Outbound HP' : 'Inbound'}] ${senderPhone}: "${cleanText}"`);
 
-            // KIRIM KE LARAVEL
+            // Meneruskan pesan ke Webhook Laravel
             await axios.post(LARAVEL_WEBHOOK_URL, {
                 phone: senderPhone,
                 pushName: pushName,
@@ -187,14 +164,10 @@ async function startWA() {
                 headers: { 'X-Token': API_TOKEN }
             });
             
-            console.log(`[System] Pesan diteruskan ke Laravel.`);
-            
         } catch (err) {
-            // Error handling yang lebih detail agar kita tahu apa yang rusak
-            console.log('[Error] Gagal memproses atau meneruskan pesan:');
+            console.log('[Error] Gagal meneruskan pesan ke Laravel:');
             if (err.response) {
-                console.log('--- Ditolak oleh Laravel ---');
-                console.log(err.response.data);
+                console.log(`--- Ditolak oleh Laravel (Status: ${err.response.status}) ---`);
             } else {
                 console.log(err.message);
             }
@@ -206,7 +179,7 @@ async function startWA() {
 // EXPRESS ENDPOINTS (UNTUK LARAVEL)
 // ==========================================
 
-// 1. Endpoint untuk menampilkan QR di Laravel (KEMBALI DITAMBAHKAN)
+// 1. Endpoint Cek Status & QR
 app.get('/status', (req, res) => {
     res.json({
         isConnected: !!sock?.user,
@@ -215,9 +188,9 @@ app.get('/status', (req, res) => {
     });
 });
 
-// 2. Endpoint untuk Logout dari Laravel (KEMBALI DITAMBAHKAN)
+// 2. Endpoint Logout / Putuskan Sesi
 app.post('/logout', checkToken, async (req, res) => {
-    console.log('[System] Menerima perintah instruksi Logout.');
+    console.log('[System] Menerima instruksi Logout dari Web.');
     try {
         if (sock) await sock.logout();
     } catch (e) {}
@@ -251,16 +224,16 @@ app.post('/send-message', checkToken, (req, res) => {
             
             if (sock) {
                 await sock.sendMessage(jid, { text: message });
-                console.log(`[Outbound] Pesan terkirim ke ${jid}.`);
+                console.log(`[Outbound API] Pesan terkirim ke ${jid}.`);
             }
         } catch (err) {
-            console.log(`[Error] Gagal mengirim pesan: ${err.message}`);
+            console.log(`[Error] Gagal mengirim pesan ke ${phone}: ${err.message}`);
         }
     })();
 });
 
 // ==========================================
-// ENDPOINT KIRIM PDF
+// ENDPOINT KIRIM DOKUMEN (PDF)
 // ==========================================
 app.post('/send-document', checkToken, (req, res) => {
     const { phone, caption, document, filename } = req.body;
@@ -281,13 +254,20 @@ app.post('/send-document', checkToken, (req, res) => {
                     fileName: filename || 'Dokumen.pdf',
                     caption: caption || ''
                 });
-                console.log(`[Outbound] Dokumen terkirim ke ${jid}.`);
+                console.log(`[Outbound API] Dokumen PDF terkirim ke ${jid}.`);
             }
         } catch (err) {
-            console.log(`[Error] Gagal mengirim dokumen: ${err.message}`);
+            console.log(`[Error] Gagal mengirim dokumen ke ${phone}: ${err.message}`);
         }
     })();
 });
 
+// ==========================================
+// JALANKAN SERVER
+// ==========================================
 startWA();
-app.listen(3001, () => console.log('[System] WhatsApp Gateway berjalan di Port 3001.'));
+app.listen(3001, () => {
+    console.log('=============================================');
+    console.log('[System] WhatsApp Gateway Berjalan di Port 3001');
+    console.log('=============================================');
+});
