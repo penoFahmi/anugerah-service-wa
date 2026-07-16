@@ -113,13 +113,19 @@ async function startWA() {
   // Kirim Pesan Masuk ke Laravel
   sock.ev.on("messages.upsert", async (msg) => {
     const m = msg.messages[0];
+
+    // Cegat pesan sistem WhatsApp, distribusi kunci, ATAU BROADCAST STATUS (Story WA)
     if (
       !m.message ||
       m.message.protocolMessage ||
-      m.message.senderKeyDistributionMessage
+      m.message.senderKeyDistributionMessage ||
+      m.key.remoteJid === "status@broadcast" // Mencegah bot merespon Status WA orang
     )
       return;
+
+    // Cegat pesan dari Grup WA
     if (m.key.remoteJid && m.key.remoteJid.includes("@g.us")) return;
+    // -----------------------
 
     try {
       const senderPhone = extractCleanPhoneNumber(m);
@@ -128,12 +134,16 @@ async function startWA() {
       let extractedText = extractMessageText(m.message);
       const isFromMe = m.key.fromMe || false;
 
+      // Berikan label khusus jika pesan kosong (berupa media)
       if (!extractedText.trim()) {
         if (messageType === "image") extractedText = "[Gambar]";
         else if (messageType === "voice_note") extractedText = "[Voice Note]";
         else if (messageType === "sticker") extractedText = "[Stiker]";
         else if (messageType === "document") extractedText = "[Dokumen]";
-        else return;
+        else if (messageType === "location") extractedText = "[Lokasi]";
+        else if (messageType === "contact") extractedText = "[Kontak]";
+        else if (messageType === "video") extractedText = "[Video]";
+        else return; // Abaikan pesan jika tidak diketahui tipenya
       }
 
       const cleanText = extractedText.trim();
@@ -141,10 +151,11 @@ async function startWA() {
         `[${isFromMe ? "Outbound HP" : "Inbound"}] ${senderPhone}: "${cleanText}"`,
       );
 
+      // Teruskan pesan bersih ke Webhook Laravel
       await axios.post(
         LARAVEL_WEBHOOK_URL,
         {
-          id: m.key.id, // [FIX] Mengirim ID pesan ke Laravel
+          id: m.key.id,
           phone: senderPhone,
           pushName: pushName,
           type: messageType,
